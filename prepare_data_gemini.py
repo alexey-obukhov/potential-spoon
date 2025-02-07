@@ -5,12 +5,18 @@ import html
 from nltk.corpus import stopwords
 from nltk.stem import WordNetLemmatizer
 from nltk.metrics.distance import edit_distance
-from transformers import AutoTokenizer, AutoModelForSeq2SeqLM, MarianMTModel, MarianTokenizer
+from transformers import MarianMTModel, MarianTokenizer, AutoTokenizer, AutoModelForSeq2SeqLM
 import torch
 import argparse
+from torch.cuda.amp import autocast
+from sklearn.metrics.pairwise import cosine_similarity
 from school_logging.log import ColoredLogger
 import multiprocessing
 
+# Load the model and tokenizer using Auto classes
+model_name = "t5-base"  # You can replace this with any Seq2Seq model like "facebook/bart-large"
+tokenizer = AutoTokenizer.from_pretrained(model_name)
+model = AutoModelForSeq2SeqLM.from_pretrained(model_name)
 # Check for CUDA availability and set the device
 # Set multiprocessing start method to 'spawn' for CUDA compatibility
 if __name__ == '__main__':
@@ -55,7 +61,7 @@ def clean_text(text, logger):
     logger.debug(f"Cleaned text: '{cleaned_text[:50]}...'")
     return cleaned_text.strip()
 
-def back_translate_with_marian(text, logger, lang="fr", tokenizer=None, model=None):
+def back_translate_with_marian(text, logger, lang="fr", tokenizer=None, model=None, device="cuda"):
     """Back-translates text using MarianMT models (takes tokenizer and model)."""
     logger.debug(f"Back-translating text: '{text[:50]}...' to language: {lang}")
 
@@ -64,6 +70,9 @@ def back_translate_with_marian(text, logger, lang="fr", tokenizer=None, model=No
         return None
 
     try:
+        # Ensure model is on the correct device
+        model = model.to(device)  # Move the model to the device
+
         # Translate from English to the target language
         inputs = tokenizer(text, return_tensors="pt", padding=True, truncation=True, max_length=512).to(device)
         translated_ids = model.generate(**inputs)
@@ -80,7 +89,7 @@ def back_translate_with_marian(text, logger, lang="fr", tokenizer=None, model=No
         logger.error(f"Error during back-translation with MarianMT: {e}")
         return None
 
-def paraphrase(text, logger, num_return_sequences=1, max_length=96, tokenizer=None, model=None):
+def paraphrase(text, logger, num_return_sequences=2, max_length=96, tokenizer=None, model=None):
     """Generates paraphrases using a pre-trained T5 model (takes tokenizer and model)."""
     logger.debug(f"Paraphrasing text: '{text[:50]}...'")
 
@@ -93,7 +102,7 @@ def paraphrase(text, logger, num_return_sequences=1, max_length=96, tokenizer=No
         generated_ids = model.generate(
             input_ids=input_ids,
             num_return_sequences=num_return_sequences,
-            num_beams=2,  # keep this low for testing
+            num_beams=10,  # keep this low for testing
             max_length=max_length,
             repetition_penalty=2.5,
             length_penalty=1.0,
@@ -113,6 +122,26 @@ def is_similar(text1, text2, logger, threshold=0.8):
     max_len = max(len(text1), len(text2))
     similarity = 1 - (distance / max_len) if max_len > 0 else 0
     logger.debug(f"Similarity score: {similarity}")
+    return similarity >= threshold
+
+def get_embedding(text):
+    """Generates a dense vector (embedding) for a given text using AutoModelForSeq2SeqLM."""
+    inputs = tokenizer(text, return_tensors="pt", padding=True, truncation=True, max_length=512)
+    with torch.no_grad():
+        outputs = model.encoder(**inputs)  # Use the encoder part of the model for embeddings
+    # Using the mean of the last hidden state as the embedding (you can experiment with other strategies)
+    embedding = outputs.last_hidden_state.mean(dim=1)  # Mean pooling across tokens
+    return embedding
+
+def is_similar(text1, text2, logger, threshold=0.8):
+    """Checks if two texts are similar based on cosine similarity of their embeddings."""
+    logger.debug(f"Checking similarity between: '{text1[:50]}...' and '{text2[:50]}...'")
+    # Get embeddings for both texts
+    embedding1 = get_embedding(text1)
+    embedding2 = get_embedding(text2)
+    # Compute cosine similarity
+    similarity = cosine_similarity(embedding1.cpu().numpy(), embedding2.cpu().numpy())[0][0]
+    logger.debug(f"Cosine similarity score: {similarity}")
     return similarity >= threshold
 
 def create_context(df, question_ids, logger):
@@ -138,45 +167,71 @@ def create_context(df, question_ids, logger):
 def process_chunk(chunk_df, logger):
     """Processes a chunk of data, generating variations and creating data points."""
     chunk_data = []
+
+    # Initialize paraphrase model and tokenizer
+    paraphrase_tokenizer = AutoTokenizer.from_pretrained(model_name)
+    paraphrase_model = AutoModelForSeq2SeqLM.from_pretrained(model_name).to(device)
+
     marian_model_names = {
-        "fr": "Helsinki-NLP/opus-mt-en-fr",
-        "de": "Helsinki-NLP/opus-mt-en-de",
-        "es": "Helsinki-NLP/opus-mt-en-es",
-        "it": "Helsinki-NLP/opus-mt-en-it",
-        "nl": "Helsinki-NLP/opus-mt-en-nl",
-        "ro": "Helsinki-NLP/opus-mt-en-ro",
-        "zh": "Helsinki-NLP/opus-mt-zh-en"
-    }
+        "fr": ("Helsinki-NLP/opus-mt-en-fr", "Helsinki-NLP/opus-mt-fr-en"),
+        "de": ("Helsinki-NLP/opus-mt-en-de", "Helsinki-NLP/opus-mt-de-en"),
+        "es": ("Helsinki-NLP/opus-mt-en-es", "Helsinki-NLP/opus-mt-es-en"),
+        "it": ("Helsinki-NLP/opus-mt-en-it", "Helsinki-NLP/opus-mt-it-en"),
+        "nl": ("Helsinki-NLP/opus-mt-en-nl", "Helsinki-NLP/opus-mt-nl-en"),
+        "ru": ("Helsinki-NLP/opus-mt-en-ru", "Helsinki-NLP/opus-mt-ru-en"),
+        "zh": ("Helsinki-NLP/opus-mt-en-zh", "Helsinki-NLP/opus-mt-zh-en")}
+
+    # Load models and tokenizers for each language
     marian_models = {
-        lang: MarianMTModel.from_pretrained(model_name).to(device)
-        for lang, model_name in marian_model_names.items()
+        lang: {
+            'forward': MarianMTModel.from_pretrained(forward_model).to(device),
+            'reverse': MarianMTModel.from_pretrained(reverse_model).to(device)
+        }
+        for lang, (forward_model, reverse_model) in marian_model_names.items()
     }
+
     marian_tokenizers = {
-        lang: MarianTokenizer.from_pretrained(model_name)
-        for lang, model_name in marian_model_names.items()
+        lang: {
+            'forward': MarianTokenizer.from_pretrained(forward_model),
+            'reverse': MarianTokenizer.from_pretrained(reverse_model)
+        }
+        for lang, (forward_model, reverse_model) in marian_model_names.items()
     }
 
-    paraphrase_model_name = "t5-base"
-    paraphrase_tokenizer = AutoTokenizer.from_pretrained(paraphrase_model_name)
-    paraphrase_model = AutoModelForSeq2SeqLM.from_pretrained(paraphrase_model_name).to(device)
-
+    # Process each row in the dataframe
     for _, row in chunk_df.iterrows():
         variations = []
         potential_variations = []
 
-        for lang in ["fr", "de", "es", "it", "nl", "ro", "zh"]:
-            variation = back_translate_with_marian(row['questionText'], logger, lang=lang, tokenizer=marian_tokenizers[lang], model=marian_models[lang])
-            if variation:
-                potential_variations.append(variation)
+        # Translate each question in the row for every language
+        for lang in marian_model_names.keys():
+            # Prepare input for translation (forward: English -> target language)
+            input_text = row['questionText']
+            inputs = marian_tokenizers[lang]['forward']([input_text], return_tensors="pt", padding=True, truncation=True).to(device)
 
-        paraphrases = paraphrase(row['questionText'], logger, num_return_sequences=1, max_length=96, tokenizer=paraphrase_tokenizer, model=paraphrase_model)
+            # Forward translation (English -> target language)
+            translated_ids = marian_models[lang]['forward'].generate(**inputs)
+            translation = marian_tokenizers[lang]['forward'].decode(translated_ids[0], skip_special_tokens=True)
+
+            # Reverse translation (target language -> English)
+            reverse_inputs = marian_tokenizers[lang]['reverse']([translation], return_tensors="pt", padding=True, truncation=True).to(device)
+            translated_back_ids = marian_models[lang]['reverse'].generate(**reverse_inputs)
+            translated_back = marian_tokenizers[lang]['reverse'].decode(translated_back_ids[0], skip_special_tokens=True)
+
+            # Add reverse translation to potential variations
+            potential_variations.append(translated_back)
+
+        # Generate paraphrases using T5 (assuming paraphrase function is still in use)
+        paraphrases = paraphrase(row['questionText'], logger, num_return_sequences=2, max_length=96, tokenizer=paraphrase_tokenizer, model=paraphrase_model)
         potential_variations.extend(paraphrases)
 
+        # Filter out similar variations
         for variation in potential_variations:
             if variation and not is_similar(row['questionText'], variation, logger):
                 if not any(is_similar(variation, existing_variation, logger) for existing_variation in variations):
                     variations.append(variation)
 
+        # Store the data point
         data_point = {
             "context": row['context'],
             "question": row['questionText'],
@@ -191,6 +246,7 @@ def process_chunk(chunk_df, logger):
         }
         chunk_data.append(data_point)
 
+    # Clear memory after processing
     del marian_models
     del marian_tokenizers
     del paraphrase_model
@@ -229,7 +285,7 @@ def prepare_counsel_chat_data(filepath, output_filepath, logger, test_mode, num_
     df = pd.read_csv(filepath)
 
     if test_mode:
-        first_question_id = df['questionID'].unique()[0]
+        first_question_id = df['questionID'].unique()[1]
         df = df[df['questionID'] == first_question_id]
         logger.info("Test mode enabled. Processing only the first question.")
 
