@@ -6,6 +6,8 @@
 
 Empathic Therapy AI is an advanced NLP-based project focused on training AI models to think and respond in an empathetic, human-like manner. The system generates structured therapeutic responses based on various established methodologies, fostering deep understanding, active listening, and compassionate communication.
 
+⚠️ After cloning please execute 'git submodule add https://github.com/vertok/counsel-chat.git data' to add the required chat-data.
+
 🔹 Current Stage: Expanding the training dataset to refine AI responses.🔹 Future Goal: Developing a full-fledged Psychological AI based on this project.
 
 🏗️ Methodologies
