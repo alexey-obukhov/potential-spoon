@@ -8,6 +8,9 @@ Empathic Therapy AI is an advanced NLP-based project focused on training AI mode
 
 ⚠️ After cloning please execute 'git submodule add https://github.com/vertok/counsel-chat.git data' to add the required chat-data.
 
+[Click here to visit the website with information about the original chat-data](https://medium.com/towards-data-science/counsel-chat-bootstrapping-high-quality-therapy-data-971b419f33da)
+Please note that the data used in this repository has been modified by me to better suit my project's [modifications one can see here](https://github.com/vertok/counsel-chat)
+
 🔹 Current Stage: Expanding the training dataset to refine AI responses.🔹 Future Goal: Developing a full-fledged Psychological AI based on this project.
 
 🏗️ Methodologies
