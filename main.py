@@ -3,6 +3,7 @@ from dotenv import load_dotenv
 import torch
 import multiprocessing as mp
 from flask import Flask, request, jsonify, g
+import asyncio
 
 from rag_processor import RAGProcessor
 from database import DatabaseManager
@@ -33,7 +34,6 @@ if __name__ == '__main__':
 
     print("Welcome to the Therapy AI Assistant!")
 
-    @app.before_request
     def before_request():
         """Initialize DatabaseManager and RAGProcessor before each request."""
         user_id = request.headers.get('X-User-ID')
@@ -46,11 +46,17 @@ if __name__ == '__main__':
         # Initialize DatabaseManager and store in 'g'
         g.db_manager = DatabaseManager(supabase_url, supabase_key, g.user_id)
 
-        # Create user schema for the current user
-        g.db_manager.create_user_schema()  # Do not pass user_id here, it's already stored in the instance
+        # Create user schema for the current user (asynchronously)
+        schema_creation_result = g.db_manager.create_user_schema()
+
+        # Check if schema creation was successful
+        if not schema_creation_result:
+            return jsonify({'error': 'Failed to create user schema'}), 500
 
         # Initialize RAGProcessor and store in 'g'
         g.rag_processor = RAGProcessor(g.db_manager, generator)
+
+    app.before_request(before_request)  # Register the function
 
     @app.route('/chat', methods=['POST'])
     def chat():
@@ -89,4 +95,4 @@ if __name__ == '__main__':
         documents = g.db_manager.get_all_documents_and_embeddings()
         return jsonify({'documents': documents})
 
-    app.run(debug=True, port=5000)
+    app.run(debug=False, port=5003)
