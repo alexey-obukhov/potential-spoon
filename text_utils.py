@@ -43,6 +43,7 @@ def clean_text(text: str) -> str:
     text = re.sub(r"[^a-zA-Z0-9\s.,?!'\":-]", "", text)   # Remove unwanted characters except ':' and '-
     text = re.sub(r"\s+", " ", text).strip()              # Remove extra whitespace
     text = re.sub(r'\n+', '\n', text)                     # Remove redundant newlines
+    text = text.replace("'", "''")                        # Escape single quotes for SQL
     return text
 
 
