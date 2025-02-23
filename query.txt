@@ -1,0 +1,92 @@
+-- 1. Enable the vector extension (if not already enabled)
+CREATE EXTENSION IF NOT EXISTS vector;
+
+-- 2. Function to check if a schema exists
+CREATE OR REPLACE FUNCTION get_schema_exists(p_schema_name text)
+RETURNS boolean AS $$
+BEGIN
+  RETURN EXISTS (
+    SELECT 1
+    FROM information_schema.schemata
+    WHERE schema_name = p_schema_name
+  );
+END;
+$$ LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public;
+
+-- 3. Function to create a new schema dynamically
+CREATE OR REPLACE FUNCTION create_user_schema(p_schema_name text)
+RETURNS void AS $$
+BEGIN
+  -- Create the schema if it doesn't exist
+  EXECUTE format('CREATE SCHEMA IF NOT EXISTS %I;', p_schema_name);
+  
+  -- Grant usage on the schema to anon and authenticated roles
+  EXECUTE format('GRANT USAGE ON SCHEMA %I TO anon, authenticated;', p_schema_name);
+
+  -- Create the view in the public schema for easy access
+  EXECUTE format('CREATE VIEW public.%I_interactions AS SELECT * FROM %I.interactions;', p_schema_name, p_schema_name);
+END;
+$$ LANGUAGE plpgsql;
+
+-- 4. Function to check if the user schema view exists in the public schema
+CREATE OR REPLACE FUNCTION ensure_user_schema_view(p_schema_name text)
+RETURNS void AS $$
+BEGIN
+  -- Check if the view already exists in the public schema
+  PERFORM * FROM information_schema.views 
+  WHERE table_schema = 'public' 
+  AND table_name = p_schema_name || '_interactions';
+  
+  -- If the view doesn't exist, create it
+  IF NOT FOUND THEN
+    EXECUTE format('CREATE VIEW public.%I_interactions AS SELECT * FROM %I.interactions;', p_schema_name, p_schema_name);
+  END IF;
+END;
+$$ LANGUAGE plpgsql;
+
+-- 5. Function to insert interaction data dynamically into a user's schema
+CREATE OR REPLACE FUNCTION insert_interaction(p_schema_name text, interaction_data jsonb)
+RETURNS void AS $$
+BEGIN
+  -- Insert the interaction data into the user's schema
+  EXECUTE format('INSERT INTO %I.interactions (data) VALUES (%L);', p_schema_name, interaction_data);
+END;
+$$ LANGUAGE plpgsql;
+
+-- 6. Function to retrieve the interaction history for a user dynamically
+CREATE OR REPLACE FUNCTION get_interaction_history(p_schema_name text)
+RETURNS TABLE(id integer, data jsonb) AS $$
+BEGIN
+  -- Return interaction history from the user's schema
+  RETURN QUERY EXECUTE format('SELECT id, data FROM %I.interactions;', p_schema_name);
+END;
+$$ LANGUAGE plpgsql;
+
+-- 7. Function to create the user schema and view together
+-- (This is useful for creating new users and setting them up properly)
+CREATE OR REPLACE FUNCTION setup_user_schema(p_user_id text)
+RETURNS void AS $$
+DECLARE
+  schema_name text := 'user_' || p_user_id;
+BEGIN
+  -- Create the user schema if it doesn't exist
+  PERFORM create_user_schema(schema_name);
+  
+  -- Ensure the view for the user schema exists in the public schema
+  PERFORM ensure_user_schema_view(schema_name);
+END;
+$$ LANGUAGE plpgsql;
+
+create or replace function public.sql(query text)
+returns table(result jsonb) as
+$$
+declare
+    result_set refcursor;
+begin
+    open result_set for execute query;
+    return query fetch all from result_set;
+end;
+$$ language plpgsql;
+
