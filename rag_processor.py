@@ -1,12 +1,13 @@
-from text_generator import TextGenerator, clean_text
+""" 2025, Dresden Alexey Obukhov, alexey.obukhov@hotmail.com """
+from text_generator import TextGenerator
 from database import DatabaseManager
 import torch
-from typing import List, Dict
-from utilities.therapeutic_promt import prompt_templates  # Make sure this import is correct
-import re
-import json  # Import json
+from typing import List
+from utilities.therapeutic_promt import prompt_templates
+import json
 import numpy as np
 from flask import g
+from safety_handler import SafetyHandler
 
 class RAGProcessor:
     """Handles retrieval-augmented generation logic."""
@@ -14,6 +15,7 @@ class RAGProcessor:
     def __init__(self, db_manager: DatabaseManager, generator: TextGenerator):
         self.db_manager = db_manager
         self.generator = generator
+        self.safety_handler = SafetyHandler()  # Initialize safety handler
 
     def get_relevant_documents(self, query_embedding: List[float], table_name: str = "knowledge_base", top_k: int = 5) -> List[str]:
         """Retrieves the most relevant documents using cosine similarity (calculated in Python)."""
@@ -63,8 +65,19 @@ class RAGProcessor:
     def generate_response(self, user_question: str, device: str, question_id: int = 0) -> str:
         """Generates a response using RAG."""
         
-        # Ensure the user schema exists for the current user, passing the user_id from Flask's g object
-        self.db_manager.create_user_schema()  # No need to pass user_id since it's already stored in DatabaseManager
+        # Check for harmful content first
+        is_harmful, safety_response, metadata = self.safety_handler.process_input(user_question)
+        
+        if is_harmful:
+            # Store safety response in interaction history
+            data_point = {
+                'context': "Safety response",
+                'question': user_question,
+                'answer': safety_response,
+                'metadata': metadata or {'topic': 'Safety Response', 'questionID': question_id}
+            }
+            self.db_manager.add_interaction(data_point)
+            return safety_response
 
         # Retrieve the conversation history
         history = self.db_manager.get_conversation_history()
