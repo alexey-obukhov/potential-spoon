@@ -1,4 +1,4 @@
-import asyncio
+""" 2025, Dresden Alexey Obukhov, alexey.obukhov@hotmail.com """
 import logging
 from supabase import create_client, Client
 from typing import List, Dict
@@ -37,6 +37,21 @@ class DatabaseManager:
             logger.error(f"Error creating schema for user {self.user_id}: {e}")
             return False
 
+    def create_user_schema_sync(self):
+        """Creates a user-specific schema and tables if they don't exist (synchronous version)."""
+        try:
+            # Call the stored procedure to create the schema and tables
+            response = self.supabase.rpc('create_user_schema_and_tables', {'schema_name': self.schema_name}).execute()
+            if response.data:
+                logger.error(f"Error creating schema for user {self.user_id}: {response.data}")
+                return False
+
+            logger.info(f"Schema '{self.schema_name}' and tables created successfully.")
+            return True
+        except Exception as e:
+            logger.error(f"Error creating schema for user {self.user_id}: {e}")
+            return False
+
     def get_conversation_history(self):
         """Retrieves conversation history from the user's schema."""
         try:
@@ -45,7 +60,19 @@ class DatabaseManager:
 
             # Check if the response contains data
             if response.data:
-                return response.data
+                # Transform the data to have the expected field names
+                transformed_data = []
+                for item in response.data:
+                    transformed_item = {
+                        'interactionID': item.get('interactionid'),
+                        'questionText': item.get('question'),  # in db it is question
+                        'answerText': item.get('answer'),      # in db it is answer
+                        'context': item.get('context'),
+                        'metadata': item.get('metadata'),
+                        'created_at': item.get('created_at')
+                    }
+                    transformed_data.append(transformed_item)
+                return transformed_data
             else:
                 logger.warning("No conversation history found.")
                 return []
@@ -62,17 +89,21 @@ class DatabaseManager:
             question = clean_text(data_point['question'])
             answer = clean_text(data_point['answer'])
 
+            # Add RETURNING clause to the INSERT statement to ensure it returns data
             query = f"""
             INSERT INTO {self.schema_name}.interactions (context, question, answer, metadata)
-            VALUES ('{context}', '{question}', '{answer}', '{json.dumps(data_point['metadata'])}');
+            VALUES ('{context}', '{question}', '{answer}', '{json.dumps(data_point['metadata'])}')
+            RETURNING interactionID;
             """
             response = self.supabase.rpc('sql', {'command': query}).execute()
 
             if response.data:
-                logger.error(f"Error adding interaction for user {self.user_id}: {response.data}")
+                # Now response.data contains the returned interactionID
+                logger.info(f"Added interaction with ID: {response.data} for user {self.user_id}")
+                return response
+            else:
+                logger.error(f"No data returned when adding interaction for user {self.user_id}")
                 return None
-
-            return response
         except Exception as e:
             logger.error(f"Error adding interaction for user {self.user_id}: {e}")
             return None
@@ -124,20 +155,19 @@ class DatabaseManager:
         return f'"{schema}"."{table_name}"'
 
     def get_all_documents_and_embeddings(self, table_name: str = "knowledge_base") -> List[Dict]:
-        """Retrieves all documents and their embeddings from the knowledge base using RPC."""
+        """Retrieves all documents and their embeddings from the knowledge base."""
         try:
-            table_name = self._get_table_name(table_name)
-            # Construct the SQL query to select all documents and embeddings
-            sql_query = f"""SELECT id, content, embedding FROM {table_name};"""
-
-            # Execute the query using rpc('sql', ...)
-            response = self.supabase.rpc('sql', {'command': sql_query}).execute()
+            # Use the dedicated function instead of the generic SQL function
+            response = self.supabase.rpc('get_knowledge_base_documents', 
+                                        {'schema_name': self.schema_name}).execute()
 
             if response.data:
+                logger.info(f"Retrieved {len(response.data)} documents from knowledge base")
                 return response.data
             else:
+                logger.warning("No documents found in knowledge base")
                 return []
         except Exception as e:
             logger.error(f"Error retrieving documents and embeddings: {e}")
-            traceback.print_exc()
+            traceback.print_exc()  
             return []
