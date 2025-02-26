@@ -1,18 +1,51 @@
+""" 2025, Dresden Alexey Obukhov, alexey.obukhov@hotmail.com """
 import os
 from dotenv import load_dotenv
 import torch
 import multiprocessing as mp
 from flask import Flask, request, jsonify, g
-import asyncio
+import logging
+from supabase import create_client, Client
 
 from rag_processor import RAGProcessor
 from database import DatabaseManager
 from text_generator import TextGenerator
 
+# Set up logging
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
+
 # --- Disable tokenizer parallelism ---
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 app = Flask(__name__)
+
+@app.before_first_request
+def initialize_app():
+    """Set up the application before the first request."""
+    print("Setting up application...")
+
+@app.before_request
+def before_request():
+    """Initialize DatabaseManager and RAGProcessor before each request."""
+    user_id = request.headers.get('X-User-ID')
+    if not user_id:
+        return jsonify({'error': 'User not authenticated'}), 401
+
+    # Store user_id in Flask's 'g' object
+    g.user_id = user_id
+
+    # Initialize DatabaseManager and store in 'g'
+    g.db_manager = DatabaseManager(supabase_url, supabase_key, g.user_id)
+
+    # Create user schema synchronously
+    schema_created = g.db_manager.create_user_schema_sync()
+    
+    if not schema_created:
+        return jsonify({'error': 'Failed to create user schema'}), 500
+
+    # Initialize RAGProcessor and store in 'g'
+    g.rag_processor = RAGProcessor(g.db_manager, generator)
 
 if __name__ == '__main__':
     if mp.get_start_method(allow_none=True) is None:
@@ -33,30 +66,6 @@ if __name__ == '__main__':
     generator = TextGenerator("microsoft/phi-1_5", device, use_bfloat16=False)
 
     print("Welcome to the Therapy AI Assistant!")
-
-    def before_request():
-        """Initialize DatabaseManager and RAGProcessor before each request."""
-        user_id = request.headers.get('X-User-ID')
-        if not user_id:
-            return jsonify({'error': 'User not authenticated'}), 401
-
-        # Store user_id in Flask's 'g' object
-        g.user_id = user_id
-
-        # Initialize DatabaseManager and store in 'g'
-        g.db_manager = DatabaseManager(supabase_url, supabase_key, g.user_id)
-
-        # Create user schema for the current user (asynchronously)
-        schema_creation_result = g.db_manager.create_user_schema()
-
-        # Check if schema creation was successful
-        if not schema_creation_result:
-            return jsonify({'error': 'Failed to create user schema'}), 500
-
-        # Initialize RAGProcessor and store in 'g'
-        g.rag_processor = RAGProcessor(g.db_manager, generator)
-
-    app.before_request(before_request)  # Register the function
 
     @app.route('/chat', methods=['POST'])
     def chat():
@@ -95,4 +104,15 @@ if __name__ == '__main__':
         documents = g.db_manager.get_all_documents_and_embeddings()
         return jsonify({'documents': documents})
 
-    app.run(debug=False, port=5003)
+    app.run(debug=False, port=5002)
+
+
+class DatabaseManager:
+    def __init__(self, supabase_url: str, supabase_key: str, user_id: str):
+        self.supabase_url = supabase_url
+        self.supabase_key = supabase_key
+        self.user_id = user_id  # Store the user_id for schema creation
+        self.schema_name = f"user_{user_id}"  # Dynamically generate the schema name based on user_id
+        # Initialize the Supabase client
+        self.supabase: Client = create_client(self.supabase_url, self.supabase_key)
+        logger.debug(f"DatabaseManager initialized for user: {self.user_id}")
