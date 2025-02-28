@@ -1,113 +1,135 @@
-"""
-2025, Dresden Alexey Obukhov, alexey.obukhov@hotmail.com
-
-This script is the main entry point for preparing and augmenting the Counsel Chat dataset for use in training a psychological AI model.
-It parses command-line arguments, initializes the logger, and calls the data preparation function.
-
-Usage:
-    python main.py --filepath <path_to_csv> --output_filepath <path_to_output_json> [--log_level <log_level>] [--test_mode] [--num_processes <num_processes>] [--model_name <model_name>]
-Simple Example:
-    python main.py --test_mode
-    (This will process only one question in the dataset.)
-
-Default CLI Variables:
-1. --filepath: Path to the CSV file. Default is 'data/20200325_counsel_chat.csv'.
-2. --output_filepath: Path to the output JSON file. Default is 'counsel_chat_formatted.json'.
-3. --log_level: Logging level. Default is 'INFO'. Choices are ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'].
-4. --test_mode: If set, process only the first question. Default is False.
-5. --num_processes: Number of processes to use. Default is 1.
-6. --model_name: Name of the language model to use. Default is 'microsoft/phi-2'.
-"""
-
-import argparse
-from data_augmentation import DataAugmentation
-from utilities.text_utils import clean_text
-from school_logging.log import ColoredLogger
+import os
+from dotenv import load_dotenv
 import torch
-import torch.multiprocessing as mp
-import pandas as pd
-import json
 import traceback
+import multiprocessing as mp
+from flask import Flask, request, jsonify, g
+import logging
+from supabase import create_client, Client
 
-def parse_args() -> argparse.Namespace:
-    """
-    Parses command-line arguments.
+from rag_processor import RAGProcessor
+from database import DatabaseManager
+from text_generator import TextGenerator
 
-    Returns:
-        argparse.Namespace: Parsed command-line arguments.
-    """
-    parser = argparse.ArgumentParser(description='Prepare Counsel Chat dataset.')
-    parser.add_argument('--filepath', type=str, default='data/20200325_counsel_chat.csv',
-                        help='Path to the CSV file.')
-    parser.add_argument('--output_filepath', type=str, default='counsel_chat_formatted.json',
-                        help='Output JSON path.')
-    parser.add_argument('--log_level', type=str.upper, default='INFO',
-                        choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'],
-                        help='Logging level. Default is INFO.')
-    parser.add_argument('--test_mode', action='store_true',
-                        help='Process only the first question.')
-    parser.add_argument('--num_processes', type=int, default=1,  # Adjust depending on gpu memorywith 1: ~2200MB 
-                        help='Number of processes. Default is 1.')
-    parser.add_argument('--model_name', type=str, default="microsoft/phi-2",
-                        help='Name of the language model.')
-    return parser.parse_args()
+# Set up logging
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
 
-def prepare_counsel_chat_data(filepath: str, output_filepath: str, logger: ColoredLogger, test_mode: bool, num_processes: int, model_name: str) -> None:
-    """
-    Main data preparation function.
+# --- Disable tokenizer parallelism ---
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
-    Args:
-        filepath (str): The path to the CSV file.
-        output_filepath (str): The path to the output JSON file.
-        logger (ColoredLogger): Logger for debugging and error messages.
-        test_mode (bool): Whether to process only the first question.
-        num_processes (int): The number of processes to use.
-        model_name (str): The name of the language model to use.
-    """
-    logger.info("Loading data from: '%s'", filepath)
-    try:
-        data_augmentation = DataAugmentation(logger)
-        df = pd.read_csv(filepath, encoding='utf-8', converters={
-            'questionText': clean_text,
-            'answerText': clean_text
-        })
-        required_columns = ['questionID', 'questionTitle', 'questionText', 'topic', 'answerText']
-        if not all(col in df.columns for col in required_columns):
-            logger.error("CSV file must contain columns: %s", ", ".join(required_columns))
-            return
+app = Flask(__name__)
 
-        if df.empty:
-            logger.error("The loaded DataFrame is empty.")
-            return
+@app.before_first_request
+def initialize_app():
+    """Set up the application before the first request."""
+    print("Setting up application...")
+    # Any global initialization can go here
 
-        if test_mode:
-            first_question_id = df['questionID'].unique()[8]
-            df = df[df['questionID'] == first_question_id]
-            logger.info("Test mode: Processing only one question.")
+@app.before_request
+def before_request():
+    """Initialize DatabaseManager and RAGProcessor before each request."""
+    user_id = request.headers.get('X-User-ID')
+    if not user_id:
+        return jsonify({'error': 'User not authenticated'}), 401
 
-        df['questionText_tokenized'] = df['questionText'].apply(lambda text: data_augmentation.tokenize_and_lemmatize(text))
-        df['answerText_tokenized'] = df['answerText'].apply(lambda text: data_augmentation.tokenize_and_lemmatize(text))
+    # Store user_id in Flask's 'g' object
+    g.user_id = user_id
 
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        json_data = data_augmentation.create_json_data(df, num_processes, model_name, device)
+    # Initialize DatabaseManager and store in 'g'
+    g.db_manager = DatabaseManager(supabase_url, supabase_key, g.user_id)
 
-        if not json_data:
-            logger.warning("No JSON data generated.")
-            return
+    # Create user schema synchronously
+    schema_created = g.db_manager.create_user_schema_sync()
+    
+    if not schema_created:
+        return jsonify({'error': 'Failed to create user schema'}), 500
 
-        logger.info("Saving to: '%s'", output_filepath)
-        with open(output_filepath, "w", encoding="utf-8") as f:
-            json.dump(json_data, f, indent=2, ensure_ascii=False)  # Ensure Unicode characters are not escaped
-        logger.info("Data preparation complete. Saved to %s", output_filepath)
+    # Initialize RAGProcessor and store in 'g'
+    g.rag_processor = RAGProcessor(g.db_manager, generator)
 
-    except Exception as exc:
-        logger.error("Error in prepare_counsel_chat_data: '%s'\n'%s'", exc, traceback.format_exc())
-
-if __name__ == "__main__":
-    args = parse_args()
-    logger = ColoredLogger('MyLogger', verbose=args.log_level)
-    try:
+if __name__ == '__main__':
+    if mp.get_start_method(allow_none=True) is None:
         mp.set_start_method('spawn')
-        prepare_counsel_chat_data(args.filepath, args.output_filepath, logger, args.test_mode, args.num_processes, args.model_name)
-    except Exception as exc:
-        logger.error("An unexpected error occurred in main: '%s'\n'%s'", exc, traceback.print_exc())
+    load_dotenv()
+
+    supabase_url = os.environ.get("SUPABASE_URL")
+    supabase_key = os.environ.get("SUPABASE_KEY")
+
+    if not supabase_url or not supabase_key:
+        print("Error: Please set SUPABASE_URL and SUPABASE_KEY environment variables.")
+        exit()
+
+    # --- Use GPU if available ---
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    # Initialize TextGenerator (only initialize once)
+    generator = TextGenerator("microsoft/phi-1_5", device, use_bfloat16=False)
+
+    print("Welcome to the Therapy AI Assistant!")
+
+    @app.route('/chat', methods=['POST'])
+    def chat():
+        """Handles chat interactions."""
+        try:
+            data = request.json
+            user_id = request.headers.get('X-User-ID')
+            user_question = data.get('question', '')
+            
+            if not user_question:
+                return jsonify({'error': 'No question provided'}), 400
+                
+            # Generate a unique question ID (timestamp + random component)
+            import time
+            import random
+            question_id = int(time.time() * 1000) + random.randint(1, 1000)
+            
+            device = "cpu"  # Default to CPU
+            if torch.cuda.is_available():
+                device = "cuda:0"
+            elif torch.backends.mps.is_available():
+                device = "mps"
+                
+            # Pass the question_id to generate_response
+            response = g.rag_processor.generate_response(user_question, device, question_id)
+            return jsonify({'response': response})
+            
+        except Exception as e:
+            logger.error(f"Error in chat endpoint: {e}\n{traceback.format_exc()}")
+            return jsonify({'error': 'An error occurred processing your request'}), 500
+
+    @app.route('/add_document', methods=['POST'])
+    def add_document():
+        """Handles document addition requests."""
+        data = request.get_json()
+        content = data.get('content')
+
+        if not content:
+            return jsonify({'error': 'Missing content'}), 400
+
+        # Generate embedding and store the document
+        embedding = generator.get_embedding(content)
+        if embedding is not None:
+            g.db_manager.add_document_to_knowledge_base(content, embedding.tolist())
+            return jsonify({'message': 'Document added successfully'})
+        else:
+            return jsonify({'error': 'Failed to generate embedding'}), 500
+
+    @app.route('/get_documents', methods=['GET'])
+    def get_documents():
+        """Retrieves all documents for the authenticated user."""
+        documents = g.db_manager.get_all_documents_and_embeddings()
+        return jsonify({'documents': documents})
+
+    app.run(debug=False, port=5008)
+
+
+class DatabaseManager:
+    def __init__(self, supabase_url: str, supabase_key: str, user_id: str):
+        self.supabase_url = supabase_url
+        self.supabase_key = supabase_key
+        self.user_id = user_id  # Store the user_id for schema creation
+        self.schema_name = f"user_{user_id}"  # Dynamically generate the schema name based on user_id
+        # Initialize the Supabase client
+        self.supabase: Client = create_client(self.supabase_url, self.supabase_key)
+        logger.debug(f"DatabaseManager initialized for user: {self.user_id}")
