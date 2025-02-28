@@ -41,9 +41,9 @@ def parse_args() -> argparse.Namespace:
                         help='Path to the CSV file.')
     parser.add_argument('--output_filepath', type=str, default='counsel_chat_formatted.json',
                         help='Output JSON path.')
-    parser.add_argument('--log_level', type=str.upper, default='INFO',
-                        choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'],
-                        help='Logging level. Default is INFO.')
+    # parser.add_argument('--log_level', type=str, default='INFO',
+    #                     choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'],
+    #                     help='Logging level. Default is INFO.')
     parser.add_argument('--test_mode', action='store_true',
                         help='Process only the first question.')
     parser.add_argument('--num_processes', type=int, default=1,  # Adjust depending on gpu memorywith 1: ~2200MB 
@@ -67,15 +67,29 @@ def prepare_counsel_chat_data(filepath: str, output_filepath: str, logger: Color
     logger.info("Loading data from: '%s'", filepath)
     try:
         data_augmentation = DataAugmentation(logger)
-        df = pd.read_csv(filepath, encoding='utf-8', converters={
-            'questionText': clean_text,
-            'answerText': clean_text
-        })
+        # Add parameters to handle CSV parsing issues
+        df = pd.read_csv(
+            filepath,
+            encoding='utf-8',
+            converters={
+                'questionText': clean_text,
+                'answerText': clean_text
+            },
+            on_bad_lines='warn',  # Add this to handle problematic lines
+            escapechar='\\',      # Add this to handle escaped characters
+            quotechar='"',        # Specify quote character
+            delimiter=',',        # Explicitly specify delimiter
+            skipinitialspace=True # Skip spaces after delimiter
+        )
         required_columns = ['questionID', 'questionTitle', 'questionText', 'topic', 'answerText']
-        if not all(col in df.columns for col in required_columns):
-            logger.error("CSV file must contain columns: %s", ", ".join(required_columns))
+        missing_columns = [col for col in required_columns if col not in df.columns]
+        if missing_columns:
+            logger.error("CSV file missing required columns: %s", ", ".join(missing_columns))
             return
-
+        
+        # Select only required columns
+        df = df[required_columns]
+        
         if df.empty:
             logger.error("The loaded DataFrame is empty.")
             return
@@ -101,13 +115,13 @@ def prepare_counsel_chat_data(filepath: str, output_filepath: str, logger: Color
         logger.info("Data preparation complete. Saved to %s", output_filepath)
 
     except Exception as exc:
-        logger.error("Error in prepare_counsel_chat_data: '%s'\n'%s'", exc, traceback.format_exc())
+        logger.error(f"Error in prepare_counsel_chat_data: {str(exc)!r}")
 
 if __name__ == "__main__":
     args = parse_args()
-    logger = ColoredLogger('MyLogger', verbose=args.log_level)
-    try:
+    logger = ColoredLogger('MyLogger')
+    # --- Program-Level Multiprocessing Setup (TOP LEVEL) ---
+    if mp.get_start_method(allow_none=True) is None:
         mp.set_start_method('spawn')
-        prepare_counsel_chat_data(args.filepath, args.output_filepath, logger, args.test_mode, args.num_processes, args.model_name)
-    except Exception as exc:
-        logger.error("An unexpected error occurred in main: '%s'\n'%s'", exc, traceback.print_exc())
+    # -------------------------------------------------------
+    prepare_counsel_chat_data(args.filepath, args.output_filepath, logger, args.test_mode, args.num_processes, args.model_name)
