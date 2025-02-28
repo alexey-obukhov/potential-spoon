@@ -9,10 +9,19 @@ Functions:
 
 Usage:
     from utilities.text_utils import create_context, process_chunk, get_embedding, clean_text
+    from utilities.text_utils import create_context, process_chunk, get_embedding, clean_text
 """
 
 import re
 import html
+import spacy
+import traceback
+import pandas as pd
+from typing import Any
+from collections import deque
+from school_logging.log import ColoredLogger
+from utilities.keep_words import keep_words
+
 import spacy
 import traceback
 import pandas as pd
